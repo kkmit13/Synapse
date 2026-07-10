@@ -96,7 +96,7 @@ body {
 
 @keyframes pulse-green {
   0%, 100% { opacity: 1; }
-  50% { opacity: 0.4; }
+  50%       { opacity: 0.4; }
 }
 
 .stat-chip {
@@ -108,6 +108,55 @@ body {
 .stat-chip span {
   color: var(--cyan);
   font-weight: 500;
+}
+
+/* ── SCROLL MODE TOGGLE ── */
+.scroll-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.scroll-toggle-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+  letter-spacing: 0.1em;
+}
+
+.scroll-toggle-group {
+  display: flex;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.scroll-btn {
+  background: transparent;
+  border: none;
+  border-right: 1px solid var(--border);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  padding: 4px 10px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.scroll-btn:last-child {
+  border-right: none;
+}
+
+.scroll-btn:hover {
+  background: var(--secondary);
+  color: var(--text-primary);
+}
+
+.scroll-btn.active {
+  background: var(--cyan);
+  color: var(--base);
+  font-weight: 700;
 }
 
 /* ── MAIN LAYOUT ── */
@@ -344,4 +393,328 @@ body {
   font-family: var(--font-mono);
   font-size: 10px;
   color: var(--border);
+}
+
+
+/* ── TAB BAR ── */
+.tab-bar {
+  display: flex;
+  margin-left: 20px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.tab-btn {
+  background: transparent;
+  border: none;
+  border-right: 1px solid var(--border);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  padding: 6px 16px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  text-transform: uppercase;
+}
+
+.tab-btn:last-child {
+  border-right: none;
+}
+
+.tab-btn:hover {
+  background: var(--secondary);
+  color: var(--text-primary);
+}
+
+.tab-btn.active {
+  background: var(--cyan);
+  color: var(--base);
+  font-weight: 700;
+}
+
+/* ── TIMELINE PLACEHOLDER ── */
+.timeline-placeholder {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+
+
+/* ══════════════════════════════════════
+   TIMELINE
+══════════════════════════════════════ */
+
+.tl-root {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 52px);
+  background: var(--base);
+  position: relative;
+  overflow: hidden;
+}
+
+/* ── toolbar ── */
+.tl-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 20px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.tl-toolbar-left  { display: flex; align-items: center; gap: 20px; }
+.tl-toolbar-right { display: flex; align-items: center; gap: 12px; }
+
+.tl-window-label {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.tl-window-label span { color: var(--cyan); }
+
+/* ── zoom ── */
+.tl-zoom {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.tl-zoom-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+  letter-spacing: 0.1em;
+}
+
+.tl-zoom-btn {
+  width: 26px;
+  height: 26px;
+  background: var(--secondary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-primary);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.tl-zoom-btn:hover {
+  background: var(--cyan);
+  border-color: var(--cyan);
+  color: var(--base);
+}
+
+/* ── canvas wrap ── */
+.tl-canvas-wrap {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 12px 20px;
+}
+
+/* ── time axis ── */
+.tl-axis {
+  position: relative;
+  height: 28px;
+  margin-bottom: 4px;
+}
+
+.tl-axis-tick {
+  position: absolute;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.tl-axis-tick-line {
+  width: 1px;
+  height: 6px;
+  background: var(--border);
+}
+
+.tl-axis-tick-label {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  margin-top: 2px;
+}
+
+/* ── lanes ── */
+.tl-lanes { display: flex; flex-direction: column; gap: 4px; }
+
+.tl-lane {
+  display: flex;
+  align-items: center;
+  gap: 0;
+}
+
+.tl-lane-label {
+  width: 140px;
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--amber);
+  font-weight: 500;
+  padding-right: 12px;
+  text-align: right;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tl-lane-canvas {
+  flex: 1;
+  position: relative;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--panel);
+}
+
+.tl-lane-line {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: var(--border);
+}
+
+/* ── markers ── */
+.tl-marker {
+  position: absolute;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 2px;
+  height: 32px;
+  background: var(--cyan);
+  border-radius: 1px;
+  cursor: pointer;
+  transition: background 0.15s, height 0.15s;
+}
+
+.tl-marker:hover {
+  background: #fff;
+  height: 42px;
+}
+
+.tl-marker.selected {
+  background: var(--amber);
+  height: 44px;
+  width: 3px;
+}
+
+/* ── detail card ── */
+.tl-detail-card {
+  position: absolute;
+  bottom: 24px;
+  right: 24px;
+  width: 260px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+}
+
+.tl-detail-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  background: var(--secondary);
+  border-bottom: 1px solid var(--border);
+}
+
+.tl-detail-title {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-primary);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.tl-detail-close {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 0 2px;
+  transition: color 0.15s;
+}
+
+.tl-detail-close:hover { color: var(--crimson); }
+
+.tl-detail-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 7px 14px;
+  border-bottom: 1px solid rgba(58,63,80,0.4);
+}
+
+.tl-detail-row:last-child { border-bottom: none; }
+
+.tl-detail-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.tl-detail-value {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.tl-detail-value.cyan   { color: var(--cyan); }
+.tl-detail-value.amber  { color: var(--amber); }
+.tl-detail-value.green  { color: var(--green); }
+
+
+/* ── MARKER HITBOX ── */
+.tl-marker-hit {
+  position: absolute;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 16px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.tl-marker-hit:hover .tl-marker {
+  background: #fff;
+  height: 42px;
+}
+
+/* ── ZOOM HINT ── */
+.tl-zoom-hint {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--border);
+  letter-spacing: 0.06em;
 }
