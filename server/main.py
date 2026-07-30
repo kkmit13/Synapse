@@ -1,24 +1,36 @@
 """
-Synapse - Central Server (Phase 1)
+Synapse - Central Server (Phase 1 + Phase 4)
 
 What this file does, in order:
 1. Sets up a SQLite database to permanently store every event
 2. Exposes an HTTP endpoint (/event) that devices POST events to
 3. Stamps every incoming event with ONE authoritative server timestamp
 4. Broadcasts every new event to all connected dashboard clients over WebSocket
+5. Runs anomaly detection every 15 seconds via background scheduler
+6. Exposes a /chat endpoint for the AI chat panel
+7. Exposes a /clear endpoint to wipe all data and start fresh
+8. Exposes a /snoozed endpoint so the dashboard can sync the snooze list
 """
 
 import sqlite3
 import time
 import json
+import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+from ai import check_anomalies, chat as ai_chat
 
 DB_PATH = "synapse.db"
+
+# In-memory anomaly log — keeps last 50 anomalies
+anomaly_log: list[dict] = []
+
+# In-memory snoozed list — [{device_id, event_name}] pairs the user marked as expected
+snoozed_list: list[dict] = []
 
 
 # ---------------------------------------------------------------------------
@@ -26,7 +38,6 @@ DB_PATH = "synapse.db"
 # ---------------------------------------------------------------------------
 
 def init_db():
-    """Creates the events table if it doesn't already exist."""
     conn = sqlite3.connect(DB_PATH)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS events (
@@ -44,7 +55,6 @@ def init_db():
 
 
 def save_event(event: dict):
-    """Writes one event row into SQLite."""
     conn = sqlite3.connect(DB_PATH)
     conn.execute(
         """
@@ -64,14 +74,21 @@ def save_event(event: dict):
     conn.close()
 
 
+def get_recent_events_from_db(limit: int = 20) -> list[dict]:
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT * FROM events ORDER BY server_timestamp DESC LIMIT ?", (limit,)
+    ).fetchall()
+    conn.close()
+    return [dict(row) for row in reversed(rows)]
+
+
 # ---------------------------------------------------------------------------
 # WebSocket connection manager
 # ---------------------------------------------------------------------------
 
 class ConnectionManager:
-    """Keeps track of every dashboard browser tab currently connected,
-    so we know who to push new events to."""
-
     def __init__(self):
         self.active_connections: list[WebSocket] = []
 
@@ -83,8 +100,6 @@ class ConnectionManager:
         self.active_connections.remove(websocket)
 
     async def broadcast(self, message: dict):
-        """Sends a message to every connected dashboard. If a connection
-        has gone stale, we quietly drop it instead of crashing."""
         dead_connections = []
         for connection in self.active_connections:
             try:
@@ -99,6 +114,40 @@ manager = ConnectionManager()
 
 
 # ---------------------------------------------------------------------------
+# Anomaly detection scheduler
+# ---------------------------------------------------------------------------
+
+async def anomaly_scheduler():
+    print("[AI] Anomaly detection scheduler started.")
+    while True:
+        await asyncio.sleep(15)
+        try:
+            recent = get_recent_events_from_db(limit=20)
+            if not recent:
+                continue
+
+            print(f"[AI] Running anomaly check on {len(recent)} events... ({len(snoozed_list)} snoozed)")
+            anomalies = check_anomalies(recent, snoozed=snoozed_list)
+
+            if anomalies:
+                print(f"[AI] Found {len(anomalies)} anomalie(s).")
+                for anomaly in anomalies:
+                    anomaly["detected_at"] = time.time()
+                    anomaly_log.append(anomaly)
+                    if len(anomaly_log) > 50:
+                        anomaly_log.pop(0)
+                    await manager.broadcast({
+                        "type": "anomaly",
+                        "anomaly": anomaly
+                    })
+            else:
+                print("[AI] No anomalies detected.")
+
+        except Exception as e:
+            print(f"[AI] Scheduler error: {e}")
+
+
+# ---------------------------------------------------------------------------
 # App setup
 # ---------------------------------------------------------------------------
 
@@ -106,13 +155,14 @@ manager = ConnectionManager()
 async def lifespan(app: FastAPI):
     init_db()
     print("Synapse server starting up. Database ready.")
+    task = asyncio.create_task(anomaly_scheduler())
     yield
+    task.cancel()
     print("Synapse server shutting down.")
 
 
 app = FastAPI(lifespan=lifespan)
 
-# Allows the React dashboard (running on a different port) to talk to this server
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -122,7 +172,7 @@ app.add_middleware(
 
 
 # ---------------------------------------------------------------------------
-# Request schema
+# Request schemas
 # ---------------------------------------------------------------------------
 
 class EventIn(BaseModel):
@@ -130,7 +180,16 @@ class EventIn(BaseModel):
     event_name: str
     value: float | str | None = None
     unit: str | None = None
-    device_timestamp: float | None = None  # the device's own clock, for comparison only
+    device_timestamp: float | None = None
+
+
+class ChatIn(BaseModel):
+    question: str
+
+
+class SnoozedItem(BaseModel):
+    device_id: str
+    event_name: str
 
 
 # ---------------------------------------------------------------------------
@@ -144,23 +203,16 @@ def root():
 
 @app.post("/event")
 async def receive_event(event: EventIn):
-    """This is the endpoint every device SDK sends events to."""
-
-    # This is the core fix for the clock-drift problem: every event gets
-    # ONE authoritative timestamp from the server's own clock, regardless
-    # of what the device's clock says.
     enriched_event = event.model_dump()
     enriched_event["server_timestamp"] = time.time()
-
+    enriched_event["type"] = "event"
     save_event(enriched_event)
     await manager.broadcast(enriched_event)
-
     return {"status": "received", "server_timestamp": enriched_event["server_timestamp"]}
 
 
 @app.get("/events")
 def get_recent_events(limit: int = 100):
-    """Lets the dashboard load recent history when it first connects."""
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     rows = conn.execute(
@@ -170,15 +222,54 @@ def get_recent_events(limit: int = 100):
     return [dict(row) for row in rows]
 
 
+@app.get("/anomalies")
+def get_anomalies():
+    return anomaly_log
+
+
+@app.post("/snoozed")
+async def update_snoozed(items: list[SnoozedItem]):
+    """
+    Dashboard POSTs the current snooze list here whenever it changes.
+    Server stores it so the anomaly scheduler uses it on the next check.
+    """
+    global snoozed_list
+    snoozed_list = [item.model_dump() for item in items]
+    print(f"[SNOOZE] Updated: {len(snoozed_list)} snoozed item(s)")
+    return {"status": "ok", "snoozed": len(snoozed_list)}
+
+
+@app.post("/clear")
+async def clear_all():
+    """Wipes all events, anomalies, and snoozed items. Broadcasts reset to dashboard."""
+    global anomaly_log, snoozed_list
+
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("DELETE FROM events")
+    conn.commit()
+    conn.close()
+
+    anomaly_log.clear()
+    snoozed_list.clear()
+
+    await manager.broadcast({"type": "clear"})
+
+    print("[CLEAR] All data wiped. Fresh session started.")
+    return {"status": "cleared"}
+
+
+@app.post("/chat")
+async def chat_endpoint(body: ChatIn):
+    recent = get_recent_events_from_db(limit=100)
+    response = ai_chat(body.question, recent, anomaly_log)
+    return {"response": response}
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    """The dashboard connects here. Connection stays open, and we push
-    new events through it the instant they arrive."""
     await manager.connect(websocket)
     try:
         while True:
-            # We don't expect the dashboard to send anything, but this keeps
-            # the connection alive and lets us detect disconnects.
             await websocket.receive_text()
     except WebSocketDisconnect:
         manager.disconnect(websocket)
