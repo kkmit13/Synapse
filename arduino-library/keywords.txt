@@ -1,0 +1,9 @@
+# Synapse Arduino Library — keyword definitions
+# These give syntax highlighting in Arduino IDE
+
+# Class name
+Synapse	KEYWORD1
+
+# Methods
+begin	KEYWORD2
+emit	KEYWORD2
