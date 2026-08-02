@@ -22,7 +22,7 @@ Send sensor data from any Arduino-compatible board to the [Synapse](https://gith
 
 ```cpp
 #include <WiFi.h>
-#include <Synapse.h>
+#include <SynapseDebugger.h>
 
 Synapse synapse("192.168.x.x", 8000, "my-device");
 
