@@ -42,7 +42,7 @@ void loop() {
 
 **Step 1 — Sketch:**
 ```cpp
-#include <Synapse.h>
+#include <SynapseDebugger.h>
 
 Synapse synapse(Serial, "my-arduino");
 
