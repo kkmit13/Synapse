@@ -1,4 +1,3 @@
-// Human-readable labels for each category
 const CATEGORY_LABELS = {
   out_of_range:       'Out of range value',
   motor_stall:        'Motor stall',
@@ -24,8 +23,13 @@ function formatTime(ts) {
     String(d.getMilliseconds()).padStart(3, '0');
 }
 
-function AnomalyCard({ anomaly, isSnoozed, onSnooze, onUnsnooze }) {
-  const color = severityColor(anomaly.severity);
+// Key used to match feedback entries to anomaly cards
+function feedbackKey(anomaly) {
+  return `${anomaly.device_id}|${anomaly.event_name}|${anomaly.category}`;
+}
+
+function AnomalyCard({ anomaly, isSnoozed, onSnooze, onUnsnooze, feedbackVerdict, onFeedback }) {
+  const color         = severityColor(anomaly.severity);
   const categoryLabel = CATEGORY_LABELS[anomaly.category] || anomaly.category || 'Unknown';
 
   return (
@@ -54,7 +58,6 @@ function AnomalyCard({ anomaly, isSnoozed, onSnooze, onUnsnooze }) {
         </div>
       </div>
 
-      {/* Category tag + title */}
       <div className="anomaly-category-tag">{categoryLabel}</div>
       <div className="anomaly-title">{anomaly.title}</div>
 
@@ -63,6 +66,7 @@ function AnomalyCard({ anomaly, isSnoozed, onSnooze, onUnsnooze }) {
           Snoozed this session — AI will not flag "{categoryLabel}" on {anomaly.device_id} / {anomaly.event_name} again until you clear or unsnooze
         </div>
       )}
+
       {!isSnoozed && (
         <>
           <div className="anomaly-explanation">{anomaly.explanation}</div>
@@ -70,20 +74,51 @@ function AnomalyCard({ anomaly, isSnoozed, onSnooze, onUnsnooze }) {
             <span className="anomaly-suggestion-label">Fix: </span>
             {anomaly.suggestion}
           </div>
+
+          {/* Feedback buttons */}
+          <div className="anomaly-feedback-row">
+            <span className="anomaly-feedback-label">Was this correct?</span>
+            <div className="anomaly-feedback-btns">
+              <button
+                className={`anomaly-feedback-btn anomaly-feedback-confirm
+                  ${feedbackVerdict === 'confirmed' ? 'anomaly-feedback-confirm-active' : ''}`}
+                onClick={() => onFeedback(anomaly, feedbackVerdict === 'confirmed' ? null : 'confirmed')}
+                title="Confirm — this is a real issue, keep watching for it"
+              >
+                ✓ Real
+              </button>
+              <button
+                className={`anomaly-feedback-btn anomaly-feedback-fp
+                  ${feedbackVerdict === 'false_positive' ? 'anomaly-feedback-fp-active' : ''}`}
+                onClick={() => onFeedback(anomaly, feedbackVerdict === 'false_positive' ? null : 'false_positive')}
+                title="False positive — this is expected behavior, stop flagging it"
+              >
+                ✗ False positive
+              </button>
+            </div>
+          </div>
         </>
       )}
     </div>
   );
 }
 
-export default function AnomalyLog({ anomalies, snoozed, onSnooze, onUnsnooze, onClose }) {
-  // Match on device_id + event_name + category — stable because category is a fixed enum
+export default function AnomalyLog({ anomalies, snoozed, feedback, onSnooze, onUnsnooze, onFeedback, onClose }) {
   function isSnoozed(anomaly) {
     return snoozed.some(
       s => s.device_id  === anomaly.device_id  &&
            s.event_name === anomaly.event_name &&
            s.category   === anomaly.category
     );
+  }
+
+  function getVerdict(anomaly) {
+    const entry = feedback.find(f =>
+      f.device_id  === anomaly.device_id  &&
+      f.event_name === anomaly.event_name &&
+      f.category   === anomaly.category
+    );
+    return entry ? entry.verdict : null;
   }
 
   return (
@@ -112,8 +147,10 @@ export default function AnomalyLog({ anomalies, snoozed, onSnooze, onUnsnooze, o
               key={i}
               anomaly={a}
               isSnoozed={isSnoozed(a)}
+              feedbackVerdict={getVerdict(a)}
               onSnooze={onSnooze}
               onUnsnooze={onUnsnooze}
+              onFeedback={onFeedback}
             />
           ))
         )}

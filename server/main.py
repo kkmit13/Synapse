@@ -1,5 +1,5 @@
 """
-Synapse - Central Server (Phase 1 + Phase 4)
+Synapse - Central Server
 
 What this file does, in order:
 1. Sets up a SQLite database to permanently store every event
@@ -10,6 +10,8 @@ What this file does, in order:
 6. Exposes a /chat endpoint for the AI chat panel
 7. Exposes a /clear endpoint to wipe all data and start fresh
 8. Exposes a /snoozed endpoint so the dashboard can sync the snooze list
+9. Exposes a /feedback endpoint so the dashboard can send anomaly feedback
+10. Events optionally carry role + behavior metadata for context-aware AI detection
 """
 
 import sqlite3
@@ -26,11 +28,9 @@ from ai import check_anomalies, chat as ai_chat
 
 DB_PATH = "synapse.db"
 
-# In-memory anomaly log — keeps last 50 anomalies
 anomaly_log: list[dict] = []
-
-# In-memory snoozed list — [{device_id, event_name}] pairs the user marked as expected
 snoozed_list: list[dict] = []
+feedback_log: list[dict] = []
 
 
 # ---------------------------------------------------------------------------
@@ -47,9 +47,17 @@ def init_db():
             value TEXT,
             unit TEXT,
             device_timestamp REAL,
-            server_timestamp REAL NOT NULL
+            server_timestamp REAL NOT NULL,
+            role TEXT,
+            behavior TEXT
         )
     """)
+    # Safely add role/behavior columns if this is an existing DB without them
+    for col in ("role", "behavior"):
+        try:
+            conn.execute(f"ALTER TABLE events ADD COLUMN {col} TEXT")
+        except Exception:
+            pass  # column already exists
     conn.commit()
     conn.close()
 
@@ -58,8 +66,9 @@ def save_event(event: dict):
     conn = sqlite3.connect(DB_PATH)
     conn.execute(
         """
-        INSERT INTO events (device_id, event_name, value, unit, device_timestamp, server_timestamp)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO events
+          (device_id, event_name, value, unit, device_timestamp, server_timestamp, role, behavior)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             event["device_id"],
@@ -68,6 +77,8 @@ def save_event(event: dict):
             event.get("unit"),
             event.get("device_timestamp"),
             event["server_timestamp"],
+            event.get("role"),
+            event.get("behavior"),
         ),
     )
     conn.commit()
@@ -126,8 +137,9 @@ async def anomaly_scheduler():
             if not recent:
                 continue
 
-            print(f"[AI] Running anomaly check on {len(recent)} events... ({len(snoozed_list)} snoozed)")
-            anomalies = check_anomalies(recent, snoozed=snoozed_list)
+            print(f"[AI] Running anomaly check on {len(recent)} events... "
+                  f"({len(snoozed_list)} snoozed, {len(feedback_log)} feedback items)")
+            anomalies = check_anomalies(recent, snoozed=snoozed_list, feedback=feedback_log)
 
             if anomalies:
                 print(f"[AI] Found {len(anomalies)} anomalie(s).")
@@ -136,10 +148,7 @@ async def anomaly_scheduler():
                     anomaly_log.append(anomaly)
                     if len(anomaly_log) > 50:
                         anomaly_log.pop(0)
-                    await manager.broadcast({
-                        "type": "anomaly",
-                        "anomaly": anomaly
-                    })
+                    await manager.broadcast({"type": "anomaly", "anomaly": anomaly})
             else:
                 print("[AI] No anomalies detected.")
 
@@ -181,6 +190,12 @@ class EventIn(BaseModel):
     value: float | str | None = None
     unit: str | None = None
     device_timestamp: float | None = None
+    # Optional metadata — gives the AI context about what this sensor represents.
+    # Existing emit() calls that don't send these still work fine (both default to None).
+    role: str | None = None
+    # e.g. "battery_voltage", "motor_rpm", "ambient_light", "power_rail", "potentiometer"
+    behavior: str | None = None
+    # e.g. "stable", "variable", "cyclic", "increasing", "decreasing"
 
 
 class ChatIn(BaseModel):
@@ -190,6 +205,15 @@ class ChatIn(BaseModel):
 class SnoozedItem(BaseModel):
     device_id: str
     event_name: str
+    category: str | None = None
+
+
+class FeedbackItem(BaseModel):
+    device_id: str
+    event_name: str
+    category: str
+    verdict: str   # "false_positive" or "confirmed"
+    note: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -229,20 +253,48 @@ def get_anomalies():
 
 @app.post("/snoozed")
 async def update_snoozed(items: list[SnoozedItem]):
-    """
-    Dashboard POSTs the current snooze list here whenever it changes.
-    Server stores it so the anomaly scheduler uses it on the next check.
-    """
     global snoozed_list
     snoozed_list = [item.model_dump() for item in items]
     print(f"[SNOOZE] Updated: {len(snoozed_list)} snoozed item(s)")
     return {"status": "ok", "snoozed": len(snoozed_list)}
 
 
+@app.post("/feedback")
+async def add_feedback(item: FeedbackItem):
+    global feedback_log
+
+    if item.verdict not in ("false_positive", "confirmed"):
+        return {"status": "error", "message": "verdict must be false_positive or confirmed"}
+
+    entry = item.model_dump()
+    entry["timestamp"] = time.time()
+
+    existing = next(
+        (i for i, f in enumerate(feedback_log)
+         if f["device_id"]  == entry["device_id"] and
+            f["event_name"] == entry["event_name"] and
+            f["category"]   == entry["category"]),
+        None
+    )
+    if existing is not None:
+        feedback_log[existing] = entry
+    else:
+        feedback_log.append(entry)
+        if len(feedback_log) > 50:
+            feedback_log.pop(0)
+
+    print(f"[FEEDBACK] {item.verdict}: {item.device_id} / {item.event_name} / {item.category}")
+    return {"status": "ok", "feedback_count": len(feedback_log)}
+
+
+@app.get("/feedback")
+def get_feedback():
+    return feedback_log
+
+
 @app.post("/clear")
 async def clear_all():
-    """Wipes all events, anomalies, and snoozed items. Broadcasts reset to dashboard."""
-    global anomaly_log, snoozed_list
+    global anomaly_log, snoozed_list, feedback_log
 
     conn = sqlite3.connect(DB_PATH)
     conn.execute("DELETE FROM events")
@@ -251,9 +303,9 @@ async def clear_all():
 
     anomaly_log.clear()
     snoozed_list.clear()
+    feedback_log.clear()
 
     await manager.broadcast({"type": "clear"})
-
     print("[CLEAR] All data wiped. Fresh session started.")
     return {"status": "cleared"}
 

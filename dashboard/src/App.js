@@ -15,8 +15,6 @@ const SCROLL_MODES = [
   { id: 'none',       label: 'Off'  },
 ];
 
-// Snooze key is now device_id + event_name + category
-// category is stable (picked from a fixed list in ai.py) so matching is reliable
 function snoozeMatch(s, anomaly) {
   return s.device_id  === anomaly.device_id  &&
          s.event_name === anomaly.event_name &&
@@ -30,7 +28,8 @@ export default function App() {
   const [scrollMode, setScrollMode]         = useState('autoscroll');
   const [activeTab, setActiveTab]           = useState('feed');
   const [anomalies, setAnomalies]           = useState([]);
-  const [snoozed, setSnoozed]               = useState([]); // [{device_id, event_name, category}]
+  const [snoozed, setSnoozed]               = useState([]);
+  const [feedback, setFeedback]             = useState([]); // [{device_id, event_name, category, verdict}]
   const [showAnomalyLog, setShowAnomalyLog] = useState(false);
   const [showAIPanel, setShowAIPanel]       = useState(false);
   const [aiFullscreen, setAiFullscreen]     = useState(false);
@@ -65,6 +64,11 @@ export default function App() {
       .then(r => r.json())
       .then(data => setAnomalies(data))
       .catch(() => {});
+
+    fetch(`${API_URL}/feedback`)
+      .then(r => r.json())
+      .then(data => setFeedback(data))
+      .catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -80,6 +84,7 @@ export default function App() {
           setEvents([]);
           setAnomalies([]);
           setSnoozed([]);
+          setFeedback([]);
           setNewestId(null);
           setNotification(null);
         } else if (data.type === 'anomaly') {
@@ -127,6 +132,48 @@ export default function App() {
 
   function handleUnsnooze(anomaly) {
     setSnoozed(prev => prev.filter(s => !snoozeMatch(s, anomaly)));
+  }
+
+  async function handleFeedback(anomaly, verdict) {
+    // verdict is "confirmed", "false_positive", or null (clear feedback)
+    // Update local state immediately for instant UI response
+    setFeedback(prev => {
+      const filtered = prev.filter(
+        f => !(f.device_id  === anomaly.device_id  &&
+               f.event_name === anomaly.event_name &&
+               f.category   === anomaly.category)
+      );
+      if (!verdict) return filtered; // null = clear feedback for this anomaly
+      return [...filtered, {
+        device_id:  anomaly.device_id,
+        event_name: anomaly.event_name,
+        category:   anomaly.category,
+        verdict,
+      }];
+    });
+
+    // If false positive — also auto-dismiss any active toast for this anomaly
+    if (verdict === 'false_positive' && notification && snoozeMatch(notification, anomaly)) {
+      setNotification(null);
+    }
+
+    // Sync to server (only when setting a verdict, not clearing)
+    if (verdict) {
+      try {
+        await fetch(`${API_URL}/feedback`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            device_id:  anomaly.device_id,
+            event_name: anomaly.event_name,
+            category:   anomaly.category,
+            verdict,
+          })
+        });
+      } catch (e) {
+        console.error('Feedback sync failed:', e);
+      }
+    }
   }
 
   async function handleClear() {
@@ -258,8 +305,10 @@ export default function App() {
           <AnomalyLog
             anomalies={anomalies}
             snoozed={snoozed}
+            feedback={feedback}
             onSnooze={handleSnooze}
             onUnsnooze={handleUnsnooze}
+            onFeedback={handleFeedback}
             onClose={() => setShowAnomalyLog(false)}
           />
         )}

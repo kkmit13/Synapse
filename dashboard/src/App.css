@@ -1283,3 +1283,72 @@ body {
   text-transform: uppercase;
   margin-bottom: 3px;
 }
+
+
+/* ── FEEDBACK BUTTONS ── */
+.anomaly-feedback-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(58,63,80,0.4);
+}
+
+.anomaly-feedback-label {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--text-muted);
+  letter-spacing: 0.08em;
+}
+
+.anomaly-feedback-btns {
+  display: flex;
+  gap: 6px;
+}
+
+.anomaly-feedback-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  padding: 2px 7px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+  color: var(--text-muted);
+}
+
+.anomaly-feedback-confirm {
+  border-color: var(--border);
+}
+
+.anomaly-feedback-confirm:hover {
+  background: rgba(57,255,20,0.1);
+  border-color: var(--green);
+  color: var(--green);
+}
+
+.anomaly-feedback-confirm-active {
+  background: rgba(57,255,20,0.1);
+  border-color: var(--green);
+  color: var(--green);
+}
+
+.anomaly-feedback-fp {
+  border-color: var(--border);
+}
+
+.anomaly-feedback-fp:hover {
+  background: rgba(255,51,54,0.1);
+  border-color: var(--crimson);
+  color: var(--crimson);
+}
+
+.anomaly-feedback-fp-active {
+  background: rgba(255,51,54,0.1);
+  border-color: var(--crimson);
+  color: var(--crimson);
+}

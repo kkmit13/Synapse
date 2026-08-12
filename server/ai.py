@@ -1,11 +1,17 @@
 """
-Synapse - AI Layer (Phase 4)
+Synapse - AI Layer
 
 Two jobs:
 1. Passive anomaly detection — runs every 15 seconds, scans recent events,
    flags anything suspicious and returns structured alerts
 2. Active chat — takes a user question + recent event context, returns a
    compact technical explanation from Claude Haiku
+
+Key design principle:
+  The AI's job is NOT to find unusual numbers — it's to PROVE a genuine
+  hardware, electrical, communication, or software fault exists using
+  objective evidence from the event stream. Single readings are rarely
+  sufficient. Corroboration across signals is required for most categories.
 """
 
 import os
@@ -31,16 +37,14 @@ Rules for all responses:
 - If data looks normal, say so briefly
 """
 
-# Fixed category list — the AI must pick one of these.
-# Using a fixed list means snoozing is stable regardless of how the AI words the title.
 ANOMALY_CATEGORIES = [
-    "out_of_range",       # value is physically impossible (e.g. -127C, -999)
-    "motor_stall",        # RPM at 0 while current spikes
-    "heap_exhaustion",    # free memory near 0
-    "wifi_dropout",       # RSSI drops to 0 or signal lost
-    "sensor_disconnect",  # sensor returns 0 or error code when it shouldn't
-    "correlated_failure", # multiple devices fail at the same timestamp
-    "spike",              # value jumps far outside its normal running range then returns
+    "out_of_range",       # value is physically impossible for this sensor type
+    "motor_stall",        # RPM near 0 AND current spike AND motor should be running
+    "heap_exhaustion",    # free memory critically near 0
+    "wifi_dropout",       # RSSI drops to 0 or connection fully lost
+    "sensor_disconnect",  # sensor returns known error code (e.g. -127, -999, exactly 0 when impossible)
+    "correlated_failure", # multiple independent sensors fail at the same timestamp
+    "spike",              # value jumps impossibly far outside physical limits then returns
 ]
 
 CATEGORY_LABELS = {
@@ -53,91 +57,162 @@ CATEGORY_LABELS = {
     "spike":              "Abnormal spike",
 }
 
+# Evidence requirements per category — used in the prompt to enforce corroboration
+EVIDENCE_REQUIREMENTS = {
+    "motor_stall":
+        "REQUIRES: RPM near 0 AND motor current spiking above normal AND motor was previously running. "
+        "RPM=0 alone is NOT a stall — motor may simply be stopped.",
+    "out_of_range":
+        "REQUIRES: value outside the absolute physical limits of this sensor type "
+        "(e.g. temperature sensor returning -127C or 999C, not just an unusual reading). "
+        "High ADC values, voltage changes, or bright light readings are NOT out of range.",
+    "heap_exhaustion":
+        "REQUIRES: free heap memory at or critically near 0 bytes. "
+        "Low but non-zero memory is not exhaustion.",
+    "wifi_dropout":
+        "REQUIRES: RSSI value of exactly 0 or connection fully lost. "
+        "Weak signal or fluctuating RSSI is normal WiFi behavior.",
+    "sensor_disconnect":
+        "REQUIRES: sensor returning a known hardware error value (-127, -999, 65535, exactly 0 "
+        "when the sensor physically cannot read 0). Unusual but plausible readings are not disconnects.",
+    "correlated_failure":
+        "REQUIRES: two or more independent sensors from different subsystems failing "
+        "within the same 1-2 second window with no plausible shared cause other than a fault.",
+    "spike":
+        "REQUIRES: value exceeds the absolute physical maximum or minimum for this sensor type, "
+        "not just a high reading. A potentiometer at 4.98V or a light sensor spiking are NOT spikes.",
+}
+
+
+def format_event_line(ev: dict) -> str:
+    """
+    Format one event for the AI prompt.
+    Includes role and behavior metadata when available so the AI knows
+    what the sensor represents and what its normal pattern looks like.
+    """
+    base = (
+        f"[{ev['device_id']}] {ev['event_name']}: {ev['value']} "
+        f"{ev.get('unit', '')} @ {ev['server_timestamp']:.3f}"
+    )
+    context_parts = []
+    if ev.get('role'):
+        context_parts.append(f"role={ev['role']}")
+    if ev.get('behavior'):
+        context_parts.append(f"behavior={ev['behavior']}")
+    if context_parts:
+        base += f"  [{', '.join(context_parts)}]"
+    return base
+
 
 # ---------------------------------------------------------------------------
 # Anomaly Detection
 # ---------------------------------------------------------------------------
 
-def check_anomalies(recent_events: list[dict], snoozed: list[dict] = []) -> list[dict]:
+def check_anomalies(
+    recent_events: list[dict],
+    snoozed: list[dict] = [],
+    feedback: list[dict] = []
+) -> list[dict]:
     """
-    Takes the last N events and a snoozed list, asks Haiku to flag anything suspicious.
-    Snoozed is a list of {device_id, event_name, category} dicts the user marked as expected.
-    Returns a list of anomaly dicts, empty if nothing found.
+    Takes the last N events, a snoozed list, and a feedback list.
+    Uses evidence-based, corroboration-required prompting to minimize
+    false positives. Role/behavior metadata enriches context when available.
     """
 
     if not recent_events:
         return []
 
-    event_lines = []
-    for ev in recent_events:
-        event_lines.append(
-            f"[{ev['device_id']}] {ev['event_name']}: {ev['value']} {ev.get('unit', '')} "
-            f"@ {ev['server_timestamp']:.3f}"
-        )
-    events_text = "\n".join(event_lines)
+    events_text = "\n".join(format_event_line(ev) for ev in recent_events)
 
-    # Build snoozed section with category so the AI knows exactly what to skip
+    # Snoozed section
     if snoozed:
         snoozed_lines = [
             f"- {s['device_id']} / {s['event_name']} / category: {s.get('category', 'any')}"
             for s in snoozed
         ]
         snoozed_text = (
-            "SNOOZED (user has marked these as expected behavior this session — "
-            "do NOT flag these under any circumstances):\n" +
+            "SNOOZED — do NOT flag these under any circumstances:\n" +
             "\n".join(snoozed_lines)
         )
     else:
         snoozed_text = "SNOOZED: none"
 
+    # Feedback section
+    if feedback:
+        false_positives = [f for f in feedback if f["verdict"] == "false_positive"]
+        confirmed       = [f for f in feedback if f["verdict"] == "confirmed"]
+        feedback_lines  = []
+
+        if false_positives:
+            feedback_lines.append("USER-CONFIRMED FALSE POSITIVES — never flag these again:")
+            for f in false_positives:
+                note = f" ({f['note']})" if f.get("note") else ""
+                feedback_lines.append(
+                    f"  - {f['device_id']} / {f['event_name']} / {f['category']}{note}"
+                )
+        if confirmed:
+            feedback_lines.append("USER-CONFIRMED REAL ISSUES — keep watching for these:")
+            for f in confirmed:
+                note = f" ({f['note']})" if f.get("note") else ""
+                feedback_lines.append(
+                    f"  - {f['device_id']} / {f['event_name']} / {f['category']}{note}"
+                )
+        feedback_text = "\n".join(feedback_lines)
+    else:
+        feedback_text = "USER FEEDBACK: none yet"
+
+    # Per-category evidence requirements
+    evidence_text = "\n".join(
+        f"  {cat}: {req}" for cat, req in EVIDENCE_REQUIREMENTS.items()
+    )
+
     categories_list = "\n".join(f'  - "{c}"' for c in ANOMALY_CATEGORIES)
 
-    prompt = f"""Analyze these sensor events from an embedded system and identify critical anomalies only.
+    prompt = f"""You are analyzing sensor events from an embedded system.
+Your job is NOT to find unusual numbers. Your job is to PROVE that a genuine hardware,
+electrical, communication, or software fault exists using objective evidence from the event stream.
 
-EVENTS:
+EVENTS (format: [device] sensor: value unit @ timestamp  [role=..., behavior=...] when known):
 {events_text}
 
 {snoozed_text}
 
-Respond ONLY with a JSON array. Each element is an anomaly you found.
-If nothing is wrong, respond with an empty array: []
+{feedback_text}
 
-Each anomaly must have these exact fields:
+---
+EVIDENCE REQUIREMENTS — each category requires specific corroborating evidence:
+{evidence_text}
+
+---
+Respond ONLY with a JSON array of confirmed faults. Empty array [] if nothing is proven.
+
+Each fault must have:
 - device_id: which device
-- event_name: which sensor/event
+- event_name: which sensor/event  
 - value: the problematic value
-- category: one of the categories listed below (pick the closest match)
+- category: one of the valid categories below
 - severity: "low", "medium", or "high"
-- title: one short sentence naming the problem
-- explanation: 1-2 sentences explaining what's wrong and likely cause
+- title: one short sentence naming the fault
+- explanation: 1-2 sentences — state the specific evidence that proves this is a fault, not just an observation
 - suggestion: 1 sentence on how to fix it
 
-Valid categories (you MUST use one of these exactly):
+Valid categories:
 {categories_list}
 
-ONLY flag an anomaly if it meets ALL of these criteria:
-1. The value is clearly wrong for physical or electrical reasons — not just unusual
-2. It would actually prevent the system from working correctly
-3. It is NOT something that could be explained by normal environment changes
-   (lights turning on/off, temperature fluctuating, someone walking past a sensor)
+ABSOLUTE RULES — return [] if any of these apply:
+- You only have one data point suggesting a problem (single-signal detections are almost always false positives)
+- The value is unusual but physically plausible for that sensor type
+- A role or behavior hint explains the reading (e.g. behavior=variable means fluctuation is expected)
+- The reading could be explained by normal environment changes (light, temperature, user interaction)
+- A potentiometer, ADC input, or analog sensor reading any value in its full range — that is normal
+- PWM values, brightness percentages, or duty cycles at any level — that is normal operation
+- Voltage rails or battery readings changing gradually — that is normal
+- Any sensor with behavior=variable showing variation — that is expected
+- WiFi RSSI fluctuating but not at exactly 0 — that is normal
+- You are not certain. Uncertainty means return [].
 
-STRICT rules — do NOT flag these under any circumstances:
-- A sensor reading a constant value (this is normal in stable environments)
-- A single value that is slightly higher or lower than recent readings
-- Light, temperature, or humidity changing gradually or suddenly (environmental)
-- Values that are stable and repeating — that is normal sensor behavior
-- Any reading that is within a physically plausible range for that sensor type
-- Mild spikes that return to normal immediately
-
-Only flag things like:
-- Values that are physically impossible (temp = -127, humidity = -999, RSSI = 0 meaning disconnected)
-- RPM = 0 AND current spiking at the same time (motor stall pattern)
-- Heap memory at or near 0 bytes free
-- Multiple sensors failing at exactly the same timestamp (correlated failure)
-- A value that stays at exactly 0.0 for a sensor that should never read 0
-
-When in doubt, return an empty array. False positives are worse than missed detections.
-Never flag anything in the SNOOZED list regardless of how unusual the value looks."""
+Only flag when you have clear, specific, corroborated evidence of a genuine fault.
+When in doubt, return []. A missed detection is better than a false alarm."""
 
     try:
         response = client.messages.create(
@@ -148,7 +223,6 @@ Never flag anything in the SNOOZED list regardless of how unusual the value look
         )
 
         raw = response.content[0].text.strip()
-
         if raw.startswith("```"):
             raw = raw.split("```")[1]
             if raw.startswith("json"):
@@ -157,12 +231,12 @@ Never flag anything in the SNOOZED list regardless of how unusual the value look
 
         anomalies = json.loads(raw)
 
-        # Normalize category — if AI returns something not in the list, default to out_of_range
+        # Normalize category
         for a in anomalies:
             if a.get('category') not in ANOMALY_CATEGORIES:
                 a['category'] = 'out_of_range'
 
-        # Belt-and-suspenders filter: strip snoozed items by device+sensor+category
+        # Belt-and-suspenders: strip snoozed
         if snoozed:
             anomalies = [
                 a for a in anomalies
@@ -172,6 +246,17 @@ Never flag anything in the SNOOZED list regardless of how unusual the value look
                     s.get('category', 'any') in ('any', a.get('category'))
                     for s in snoozed
                 )
+            ]
+
+        # Belt-and-suspenders: strip confirmed false positives
+        if feedback:
+            fp_keys = {
+                (f['device_id'], f['event_name'], f['category'])
+                for f in feedback if f['verdict'] == 'false_positive'
+            }
+            anomalies = [
+                a for a in anomalies
+                if (a.get('device_id'), a.get('event_name'), a.get('category')) not in fp_keys
             ]
 
         return anomalies if isinstance(anomalies, list) else []
@@ -186,25 +271,16 @@ Never flag anything in the SNOOZED list regardless of how unusual the value look
 # ---------------------------------------------------------------------------
 
 def chat(question: str, recent_events: list[dict], anomaly_log: list[dict]) -> str:
-    """
-    Takes a user question, recent event context, and the anomaly log.
-    Returns a compact technical response from Claude Haiku.
-    """
-
     event_lines = []
     for ev in recent_events[-100:]:
-        event_lines.append(
-            f"[{ev['device_id']}] {ev['event_name']}: {ev['value']} "
-            f"{ev.get('unit', '')} @ {ev['server_timestamp']:.3f}"
-        )
+        event_lines.append(format_event_line(ev))
     events_text = "\n".join(event_lines) if event_lines else "No recent events."
 
     if anomaly_log:
-        anomaly_lines = []
-        for a in anomaly_log[-10:]:
-            anomaly_lines.append(
-                f"[{a['severity'].upper()}] {a['device_id']} — {a['title']}"
-            )
+        anomaly_lines = [
+            f"[{a['severity'].upper()}] {a['device_id']} — {a['title']}"
+            for a in anomaly_log[-10:]
+        ]
         anomaly_text = "\n".join(anomaly_lines)
     else:
         anomaly_text = "No anomalies detected yet."
