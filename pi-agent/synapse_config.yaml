@@ -1,0 +1,51 @@
+# ─────────────────────────────────────────────────────────────
+# Synapse Pi Agent — Config File
+# Edit this file to match your hardware. No code changes needed.
+# ─────────────────────────────────────────────────────────────
+
+# Synapse server address — use your computer's local IP
+server: "http://192.168.86.22:8000"
+
+# How this Pi shows up in the dashboard
+device_id: "pi-1"
+
+# Seconds between sensor readings
+poll_interval: 2
+
+# ── Sensors ──────────────────────────────────────────────────
+# List every sensor wired to this Pi.
+# Supported types: bme280, bh1750
+# More sensor types can be added to synapse_agent.py as needed.
+
+sensors:
+
+  - type: bme280
+    address: "0x77"       # I2C address (run i2cdetect -y 1 to confirm)
+    sea_level_pressure: 1013.25
+    readings:
+      - event: bme280_temp
+        field: temperature
+        unit: C
+        role: ambient_temperature
+        behavior: variable
+
+      - event: bme280_humidity
+        field: humidity
+        unit: "%"
+        role: ambient_humidity
+        behavior: variable
+
+      - event: bme280_pressure
+        field: pressure
+        unit: hPa
+        role: barometric_pressure
+        behavior: stable
+
+  - type: bh1750
+    address: "0x23"
+    readings:
+      - event: bh1750_lux
+        field: lux
+        unit: lux
+        role: ambient_light
+        behavior: variable
