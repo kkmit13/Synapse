@@ -8,6 +8,11 @@ Simulates a realistic multi-device embedded system with:
 
 Each device has multiple sensors with realistic drift, and errors
 are injected at different intervals to test anomaly detection.
+
+Every emit includes role + behavior metadata, matching how a real
+device would use synapse.emit(). This lets the AI tell the difference
+between normal variance (a light sensor changing, a battery draining)
+and a genuine fault (a motor stalling, a sensor disconnecting).
 """
 
 import requests
@@ -20,9 +25,10 @@ SERVER = "http://127.0.0.1:8000"
 
 # ---------------------------------------------------------------------------
 # Core emit function — each device calls this with its own ID
+# role and behavior are optional metadata, same as the real Arduino/Pi clients
 # ---------------------------------------------------------------------------
 
-def emit(device_id, event_name, value, unit=None, noisy=False):
+def emit(device_id, event_name, value, unit=None, role=None, behavior=None, noisy=False):
     payload = {
         "device_id": device_id,
         "event_name": event_name,
@@ -31,10 +37,16 @@ def emit(device_id, event_name, value, unit=None, noisy=False):
         # Simulate clock drift per device — each has its own offset
         "device_timestamp": time.time() + DEVICE_CLOCK_OFFSETS.get(device_id, 0)
     }
+    if role:
+        payload["role"] = role
+    if behavior:
+        payload["behavior"] = behavior
+
     try:
         requests.post(f"{SERVER}/event", json=payload, timeout=2)
         status = "⚠" if noisy else "→"
-        print(f"  {status} [{device_id}] {event_name}: {payload['value']} {unit or ''}")
+        meta = f" [{role}]" if role else ""
+        print(f"  {status} [{device_id}] {event_name}: {payload['value']} {unit or ''}{meta}")
     except Exception as e:
         print(f"  ✗ [{device_id}] Failed: {e}")
 
@@ -65,29 +77,32 @@ def run_pi(tick):
     cpu_temp = 45.0 + math.sin(tick * 0.02) * 5 + random.uniform(-0.5, 0.5)
     cpu_load = max(0, min(100, 30 + math.sin(tick * 0.06) * 20 + random.uniform(-5, 5)))
 
-    emit(device, "bme280_temp",     temp,     "C")
-    emit(device, "bme280_humidity", humidity, "%")
-    emit(device, "bme280_pressure", pressure, "hPa")
-    emit(device, "bh1750_lux",      lux,      "lux")
-    emit(device, "cpu_temp",        cpu_temp, "C")
-    emit(device, "cpu_load",        cpu_load, "%")
+    emit(device, "bme280_temp",     temp,     "C",   role="ambient_temperature",   behavior="variable")
+    emit(device, "bme280_humidity", humidity, "%",   role="ambient_humidity",      behavior="variable")
+    emit(device, "bme280_pressure", pressure, "hPa", role="barometric_pressure",   behavior="stable")
+    emit(device, "bh1750_lux",      lux,      "lux", role="ambient_light",         behavior="variable")
+    emit(device, "cpu_temp",        cpu_temp, "C",   role="cpu_temperature",       behavior="variable")
+    emit(device, "cpu_load",        cpu_load, "%",   role="cpu_load",              behavior="variable")
 
     # Error: I2C address conflict causes BME280 to return garbage every 25 ticks
+    # This is a genuine fault — value is physically impossible regardless of metadata
     if tick % 25 == 0 and tick > 0:
         print(f"  ⚠ [{device}] I2C conflict — BME280 returning garbage")
-        emit(device, "bme280_temp", -127.0, "C", noisy=True)
-        emit(device, "bme280_humidity", 0.0, "%", noisy=True)
+        emit(device, "bme280_temp", -127.0, "C", role="ambient_temperature", behavior="variable", noisy=True)
+        emit(device, "bme280_humidity", 0.0, "%", role="ambient_humidity", behavior="variable", noisy=True)
 
     # Error: BH1750 sensor disconnect every 40 ticks
     if tick % 40 == 0 and tick > 0:
         print(f"  ⚠ [{device}] BH1750 disconnect — reading 0")
-        emit(device, "bh1750_lux", 0.0, "lux", noisy=True)
+        emit(device, "bh1750_lux", 0.0, "lux", role="ambient_light", behavior="variable", noisy=True)
 
     # Error: CPU spike every 35 ticks (simulates a heavy process)
+    # NOTE: a single CPU spike alone is often legitimate (compiling, GC, etc).
+    # The AI should treat this cautiously unless sustained or paired with other signals.
     if tick % 35 == 0 and tick > 0:
         print(f"  ⚠ [{device}] CPU spike")
-        emit(device, "cpu_load", 98.5, "%", noisy=True)
-        emit(device, "cpu_temp", 82.0, "C", noisy=True)
+        emit(device, "cpu_load", 98.5, "%", role="cpu_load", behavior="variable", noisy=True)
+        emit(device, "cpu_temp", 82.0, "C", role="cpu_temperature", behavior="variable", noisy=True)
 
 
 # ---------------------------------------------------------------------------
@@ -107,22 +122,23 @@ def run_esp32_motor(tick):
     temp     = 38.0 + math.sin(tick * 0.03) * 4 + random.uniform(-0.3, 0.3)
     position = (tick * 15) % 36000 / 100  # degrees, cycles around
 
-    emit(device, "motor_rpm",      rpm,      "RPM")
-    emit(device, "motor_current",  current,  "A")
-    emit(device, "motor_temp",     temp,     "C")
-    emit(device, "encoder_pos",    position, "deg")
+    emit(device, "motor_rpm",     rpm,      "RPM", role="motor_rpm",     behavior="variable")
+    emit(device, "motor_current", current,  "A",   role="motor_current", behavior="variable")
+    emit(device, "motor_temp",    temp,     "C",   role="motor_temperature", behavior="variable")
+    emit(device, "encoder_pos",   position, "deg", role="encoder_position",  behavior="cyclic")
 
-    # Error: motor stall — RPM drops to 0 but current spikes (overload)
+    # Error: motor stall — RPM drops to 0 AND current spikes at the same time.
+    # This is the textbook motor_stall evidence pattern — two corroborating signals.
     if tick % 45 == 0 and tick > 0:
         print(f"  ⚠ [{device}] Motor stall detected")
-        emit(device, "motor_rpm",     0.0,  "RPM",  noisy=True)
-        emit(device, "motor_current", 8.9,  "A",    noisy=True)
-        emit(device, "motor_temp",    75.0, "C",    noisy=True)
+        emit(device, "motor_rpm",     0.0,  "RPM", role="motor_rpm",     behavior="variable", noisy=True)
+        emit(device, "motor_current", 8.9,  "A",   role="motor_current", behavior="variable", noisy=True)
+        emit(device, "motor_temp",    75.0, "C",   role="motor_temperature", behavior="variable", noisy=True)
 
-    # Error: encoder dropout (position jumps to -1 = invalid)
+    # Error: encoder dropout (position jumps to -1 = invalid, physically impossible for degrees)
     if tick % 60 == 0 and tick > 0:
         print(f"  ⚠ [{device}] Encoder signal lost")
-        emit(device, "encoder_pos", -1.0, "deg", noisy=True)
+        emit(device, "encoder_pos", -1.0, "deg", role="encoder_position", behavior="cyclic", noisy=True)
 
 
 # ---------------------------------------------------------------------------
@@ -143,22 +159,25 @@ def run_arduino_env(tick):
     rain      = max(0, math.sin(tick * 0.015) * 50 + random.uniform(-2, 2))
     uv_index  = max(0, 3.0 + math.sin(tick * 0.03) * 2 + random.uniform(-0.1, 0.1))
 
-    emit(device, "dht22_temp",     temp,     "C")
-    emit(device, "dht22_humidity", humidity, "%")
-    emit(device, "mq135_aqi",      air_qual, "AQI")
-    emit(device, "rain_level",     rain,     "mm")
-    emit(device, "uv_index",       uv_index, "UV")
+    emit(device, "dht22_temp",     temp,     "C",   role="ambient_temperature", behavior="variable")
+    emit(device, "dht22_humidity", humidity, "%",   role="ambient_humidity",    behavior="variable")
+    emit(device, "mq135_aqi",      air_qual, "AQI", role="air_quality",         behavior="variable")
+    emit(device, "rain_level",     rain,     "mm",  role="rain_sensor",         behavior="variable")
+    emit(device, "uv_index",       uv_index, "UV",  role="uv_sensor",           behavior="variable")
 
-    # Error: DHT22 checksum failure — returns fixed error values
+    # Error: DHT22 checksum failure — returns fixed error values (physically impossible)
     if tick % 30 == 0 and tick > 0:
         print(f"  ⚠ [{device}] DHT22 checksum failure")
-        emit(device, "dht22_temp",     -999.0, "C",  noisy=True)
-        emit(device, "dht22_humidity", -999.0, "%",  noisy=True)
+        emit(device, "dht22_temp",     -999.0, "C", role="ambient_temperature", behavior="variable", noisy=True)
+        emit(device, "dht22_humidity", -999.0, "%", role="ambient_humidity",    behavior="variable", noisy=True)
 
     # Error: MQ135 warmup spike (gas sensor needs time to stabilize)
+    # NOTE: single-sensor spikes on a variable-behavior sensor are usually NOT flagged
+    # by the new evidence-based prompt unless the value is physically impossible.
+    # 500 AQI is a real-world extreme but not impossible, so this tests the AI's judgment.
     if tick % 50 == 0 and tick > 0:
         print(f"  ⚠ [{device}] MQ135 warmup spike")
-        emit(device, "mq135_aqi", 500.0, "AQI", noisy=True)
+        emit(device, "mq135_aqi", 500.0, "AQI", role="air_quality", behavior="variable", noisy=True)
 
 
 # ---------------------------------------------------------------------------
@@ -178,22 +197,22 @@ def run_esp32_cam(tick):
     rssi      = -60 + math.sin(tick * 0.02) * 15 + random.uniform(-2, 2)
     mem_free  = max(0, 180 + math.sin(tick * 0.05) * 30 + random.uniform(-5, 5))
 
-    emit(device, "cam_fps",         fps,      "fps")
-    emit(device, "inference_ms",    latency,  "ms")
-    emit(device, "wifi_rssi",       rssi,     "dBm")
-    emit(device, "heap_free",       mem_free, "KB")
+    emit(device, "cam_fps",      fps,     "fps", role="camera_framerate", behavior="variable")
+    emit(device, "inference_ms", latency, "ms",  role="inference_latency", behavior="variable")
+    emit(device, "wifi_rssi",    rssi,    "dBm", role="wifi_signal",      behavior="variable")
+    emit(device, "heap_free",    mem_free, "KB", role="heap_memory",      behavior="variable")
 
-    # Error: WiFi dropout — RSSI goes to 0 and FPS drops
+    # Error: WiFi dropout — RSSI goes to exactly 0 (real disconnect signature) and FPS drops to 0
     if tick % 55 == 0 and tick > 0:
         print(f"  ⚠ [{device}] WiFi dropout")
-        emit(device, "wifi_rssi", 0.0,  "dBm", noisy=True)
-        emit(device, "cam_fps",   0.0,  "fps", noisy=True)
+        emit(device, "wifi_rssi", 0.0, "dBm", role="wifi_signal",      behavior="variable", noisy=True)
+        emit(device, "cam_fps",   0.0, "fps",  role="camera_framerate", behavior="variable", noisy=True)
 
-    # Error: heap exhaustion — memory runs out, latency spikes
+    # Error: heap exhaustion — memory runs out, latency spikes (two corroborating signals)
     if tick % 70 == 0 and tick > 0:
         print(f"  ⚠ [{device}] Heap exhaustion")
-        emit(device, "heap_free",    2.0,   "KB", noisy=True)
-        emit(device, "inference_ms", 850.0, "ms", noisy=True)
+        emit(device, "heap_free",    2.0,   "KB", role="heap_memory",       behavior="variable", noisy=True)
+        emit(device, "inference_ms", 850.0, "ms", role="inference_latency", behavior="variable", noisy=True)
 
 
 # ---------------------------------------------------------------------------
@@ -204,6 +223,7 @@ def simulate():
     print("=" * 55)
     print("  Synapse Enhanced Simulator")
     print("  4 devices · 20+ sensors · realistic error injection")
+    print("  All events include role + behavior metadata")
     print("=" * 55)
     print(f"  Server: {SERVER}")
     print(f"  Devices: pi-1, esp32-motor, arduino-env, esp32-cam")
